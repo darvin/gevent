@@ -125,8 +125,9 @@ class StreamServer(BaseServer):
                     return
                 try:
                     client_socket, address = self.socket.accept()
-                except socket.error, err:
-                    if err[0] == EWOULDBLOCK:
+                except socket.error:
+                    err = sys.exc_info()[1]
+                    if err.args[0] == EWOULDBLOCK:
                         return
                     raise
                 self.delay = self.min_delay
