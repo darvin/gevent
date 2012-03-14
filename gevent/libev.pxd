@@ -10,6 +10,23 @@ cdef extern from "libev.h":
     int EV_VERSION_MAJOR
     int EV_VERSION_MINOR
 
+    int EV_USE_FLOOR
+    int EV_USE_CLOCK_SYSCALL
+    int EV_USE_REALTIME
+    int EV_USE_MONOTONIC
+    int EV_USE_NANOSLEEP
+    int EV_USE_SELECT
+    int EV_USE_POLL
+    int EV_USE_EPOLL
+    int EV_USE_KQUEUE
+    int EV_USE_PORT
+    int EV_USE_INOTIFY
+    int EV_USE_SIGNALFD
+    int EV_USE_EVENTFD
+    int EV_USE_4HEAP
+    int EV_USE_IOCP
+    int EV_SELECT_IS_WINSOCKET
+
     int EV_UNDEF
     int EV_NONE
     int EV_READ
@@ -57,9 +74,8 @@ cdef extern from "libev.h":
     struct ev_loop:
         int activecnt
         int backend_fd
-        int fdchangecnt
-        int timercnt
-        int asynccnt
+        int sigfd
+        unsigned int origflags
 
     struct ev_io:
         int fd
@@ -87,6 +103,14 @@ cdef extern from "libev.h":
         int pid
         int rpid
         int rstatus
+
+    struct stat:
+        int st_nlink
+
+    struct ev_stat:
+        stat attr
+        stat prev
+        double interval
 
     int ev_version_major()
     int ev_version_minor()
@@ -138,6 +162,10 @@ cdef extern from "libev.h":
     void ev_child_init(ev_child*, void* callback, int, int)
     void ev_child_start(ev_loop*, ev_child*)
     void ev_child_stop(ev_loop*, ev_child*)
+
+    void ev_stat_init(ev_stat*, void* callback, char*, double)
+    void ev_stat_start(ev_loop*, ev_stat*)
+    void ev_stat_stop(ev_loop*, ev_stat*)
 
     ev_loop* ev_default_loop(unsigned int flags)
     ev_loop* ev_loop_new(unsigned int flags)

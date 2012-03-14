@@ -21,8 +21,9 @@ ext_errors = (CCompilerError, DistutilsExecError, DistutilsPlatformError, IOErro
 __version__ = re.search("__version__\s*=\s*'(.*)'", open('gevent/__init__.py').read(), re.M).group(1)
 assert __version__
 
-libev_embed = os.path.exists('libev')
-ares_embed = os.path.exists('c-ares')
+embed = os.environ.get("gevent_embed", "yes").lower().strip() not in ("0", "no", "off")
+libev_embed = embed and os.path.exists('libev')
+ares_embed = embed and os.path.exists('c-ares')
 define_macros = []
 libraries = []
 libev_configure_command = ["/bin/sh", abspath('libev/configure'), '> configure-output.txt']
@@ -47,7 +48,7 @@ CORE = Extension(name='gevent.core',
                  include_dirs=['libev'],
                  libraries=libraries,
                  define_macros=define_macros,
-                 depends=expand('gevent/callbacks.*', 'gevent/libev*.h', 'libev/*.*'))
+                 depends=expand('gevent/callbacks.*', 'gevent/stathelper.c', 'gevent/libev*.h', 'libev/*.*'))
 
 ARES = Extension(name='gevent.ares',
                  sources=['gevent/gevent.ares.c'],
@@ -139,11 +140,9 @@ if libev_embed:
     CORE.define_macros += [('LIBEV_EMBED', '1'),
                            ('EV_COMMON', ''),  # we don't use void* data
                            # libev watchers that we don't use currently:
-                           ('EV_STAT_ENABLE', '0'),
                            ('EV_CHECK_ENABLE', '0'),
                            ('EV_CLEANUP_ENABLE', '0'),
                            ('EV_EMBED_ENABLE', '0'),
-                           ('EV_CHILD_ENABLE', '0'),
                            ("EV_PERIODIC_ENABLE", '0')]
     CORE.configure = configure_libev
     if sys.platform == "darwin":

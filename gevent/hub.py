@@ -76,7 +76,7 @@ def spawn_raw(function, *args, **kwargs):
     return g
 
 
-def sleep(seconds=0):
+def sleep(seconds=0, ref=True):
     """Put the current greenlet to sleep for at least *seconds*.
 
     *seconds* may be specified as an integer, or a float if fractional seconds
@@ -85,14 +85,17 @@ def sleep(seconds=0):
     If *seconds* is equal to or less than zero, yield control the other coroutines
     without actually putting the process to sleep. The :class:`core.idle` watcher
     with the highest priority is used to achieve that.
+
+    If *ref* is false, the greenlet running sleep() will not prevent gevent.run()
+    from exiting.
     """
     hub = get_hub()
     loop = hub.loop
     if seconds <= 0:
-        watcher = loop.idle()
+        watcher = loop.idle(ref=ref)
         watcher.priority = loop.MAXPRI
     else:
-        watcher = loop.timer(seconds)
+        watcher = loop.timer(seconds, ref=ref)
     hub.wait(watcher)
 
 
@@ -233,13 +236,25 @@ def _import(path):
         return path
     if '.' not in path:
         raise ImportError("Cannot import %r (required format: module.class)" % path)
-    module, item = path.rsplit('.', 1)
-    x = __import__(module)
-    for attr in path.split('.')[1:]:
-        x = getattr(x, attr, _NONE)
-        if x is _NONE:
-            raise ImportError('Cannot import name %r from %r' % (attr, x))
-    return x
+    if '/' in path:
+        package_path, path = path.rsplit('/', 1)
+        sys.path = [package_path] + sys.path
+    else:
+        package_path = None
+    try:
+        module, item = path.rsplit('.', 1)
+        x = __import__(module)
+        for attr in path.split('.')[1:]:
+            oldx = x
+            x = getattr(x, attr, _NONE)
+            if x is _NONE:
+                raise ImportError('Cannot import %r from %r' % (attr, oldx))
+        return x
+    finally:
+        try:
+            sys.path.remove(package_path)
+        except ValueError:
+            pass
 
 
 def config(default, envvar):
@@ -273,7 +288,7 @@ class Hub(greenlet):
                       'gevent.socket.BlockingResolver']
     resolver_class = resolver_config(resolver_class, 'GEVENT_RESOLVER')
     threadpool_class = config('gevent.threadpool.ThreadPool', 'GEVENT_THREADPOOL')
-    DEFAULT_BACKEND = config(None, 'GEVENT_BACKEND')
+    backend = config(None, 'GEVENT_BACKEND')
     format_context = 'pprint.pformat'
     threadpool_size = 10
 
@@ -288,7 +303,7 @@ class Hub(greenlet):
                 default = get_ident() == MAIN_THREAD
             loop_class = _import(self.loop_class)
             if loop is None:
-                loop = self.DEFAULT_BACKEND
+                loop = self.backend
             self.loop = loop_class(flags=loop, default=default)
         self._resolver = None
         self._threadpool = None

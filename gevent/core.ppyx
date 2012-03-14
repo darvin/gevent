@@ -5,7 +5,8 @@ from python cimport *
 import sys
 import os
 import traceback
-from signal import NSIG
+import signal as signalmodule
+SIGCHLD = getattr(signalmodule, 'SIGCHLD', None)
 
 
 __all__ = ['get_version',
@@ -26,6 +27,7 @@ cdef extern from "callbacks.h":
     void gevent_callback_fork(libev.ev_loop, void*, int)
     void gevent_callback_async(libev.ev_loop, void*, int)
     void gevent_callback_child(libev.ev_loop, void*, int)
+    void gevent_callback_stat(libev.ev_loop, void*, int)
     void gevent_signal_check(libev.ev_loop, void*, int)
     void gevent_periodic_signal_check(libev.ev_loop, void*, int)
 
@@ -34,6 +36,9 @@ cdef extern from *:
     int ioctlsocket(int, int, unsigned long*)
     int FIONREAD
     int errno
+
+cdef extern from "stathelper.c":
+    object _pystat_fromstructstat(void*)
 
 
 UNDEF = libev.EV_UNDEF
@@ -65,11 +70,14 @@ BACKEND_KQUEUE = libev.EVBACKEND_KQUEUE
 BACKEND_EPOLL = libev.EVBACKEND_EPOLL
 BACKEND_POLL = libev.EVBACKEND_POLL
 BACKEND_SELECT = libev.EVBACKEND_SELECT
-NOENV = libev.EVFLAG_NOENV
 FORKCHECK = libev.EVFLAG_FORKCHECK
 NOINOTIFY = libev.EVFLAG_NOINOTIFY
 SIGNALFD = libev.EVFLAG_SIGNALFD
 NOSIGMASK = libev.EVFLAG_NOSIGMASK
+
+# gevent-added flag:
+cdef int c_NOCHILD = 0x0100000U
+NOCHILD = c_NOCHILD
 
 
 @cython.internal
@@ -100,7 +108,8 @@ _flags = [(libev.EVBACKEND_PORT, 'port'),
           (libev.EVFLAG_NOENV, 'noenv'),
           (libev.EVFLAG_FORKCHECK, 'forkcheck'),
           (libev.EVFLAG_SIGNALFD, 'signalfd'),
-          (libev.EVFLAG_NOSIGMASK, 'nosigmask')]
+          (libev.EVFLAG_NOSIGMASK, 'nosigmask'),
+          (NOCHILD, 'nochild')]
 
 
 _flags_str2int = dict((string, flag) for (flag, string) in _flags)
@@ -145,16 +154,18 @@ else:
 
 cpdef unsigned int _flags_to_int(object flags) except? -1:
     # Note, that order does not matter, libev has its own predefined order
-    if flags is None:
+    if not flags:
         return 0
     if isinstance(flags, (int, long)):
         return flags
     cdef unsigned int result = 0
     try:
         if isinstance(flags, basestring):
-            return _flags_str2int[flags.lower()]
+            flags = flags.split(',')
         for value in flags:
-            result |= _flags_str2int[value.lower()]
+            value = value.strip().lower()
+            if value:
+                result |= _flags_str2int[value]
     except KeyError, ex:
         raise ValueError('Invalid backend or flag: %s\nPossible values: %s' % (ex, ', '.join(sorted(_flags_str2int.keys()))))
     return result
@@ -215,19 +226,22 @@ def time():
             return self._ptr.NAME
 
 
-cdef bint _default_loop_is_good = True
+cdef bint _default_loop_destroyed = False
 
 
 cdef public class loop [object PyGeventLoopObject, type PyGeventLoop_Type]:
     cdef libev.ev_loop* _ptr
     cdef public object error_handler
     cdef libev.ev_prepare _signal_checker
+    cdef public int nochild
 #ifdef _WIN32
     cdef libev.ev_timer _periodic_signal_checker
 #endif
 
     def __init__(self, object flags=None, object default=True, size_t ptr=0):
         cdef unsigned int c_flags
+        cdef object old_handler = None
+        self.nochild = 0
         libev.ev_prepare_init(&self._signal_checker, <void*>gevent_signal_check)
 #ifdef _WIN32
         libev.ev_timer_init(&self._periodic_signal_checker, <void*>gevent_periodic_signal_check, 0.3, 0.3)
@@ -237,12 +251,20 @@ cdef public class loop [object PyGeventLoopObject, type PyGeventLoop_Type]:
         else:
             c_flags = _flags_to_int(flags)
             _check_flags(c_flags)
-            if not _default_loop_is_good:
+            c_flags |= libev.EVFLAG_NOENV
+            if _default_loop_destroyed:
                 default = False
             if default:
+                if c_flags & c_NOCHILD:
+                    self.nochild = 1
+                    if SIGCHLD is not None:
+                        old_handler = signalmodule.getsignal(SIGCHLD)
                 self._ptr = libev.ev_default_loop(c_flags)
                 if not self._ptr:
                     raise SystemError("ev_default_loop(%s) failed" % (c_flags, ))
+                if self.nochild:
+                    if SIGCHLD is not None:
+                        signalmodule.signal(SIGCHLD, old_handler)
                 libev.ev_prepare_start(self._ptr, &self._signal_checker)
                 libev.ev_unref(self._ptr)
 #ifdef _WIN32
@@ -267,13 +289,13 @@ cdef public class loop [object PyGeventLoopObject, type PyGeventLoop_Type]:
 #endif
 
     def destroy(self):
-        global _default_loop_is_good
+        global _default_loop_destroyed
         if self._ptr:
             self._stop_signal_checker()
             if __SYSERR_CALLBACK == self._handle_syserr:
                 set_syserr_cb(None)
             if libev.ev_is_default_loop(self._ptr):
-                _default_loop_is_good = False
+                _default_loop_destroyed = True
             libev.ev_loop_destroy(self._ptr)
             self._ptr = NULL
 
@@ -407,8 +429,17 @@ cdef public class loop [object PyGeventLoopObject, type PyGeventLoop_Type]:
     def async(self, ref=True):
         return async(self, ref)
 
-    #def child(self, int pid, bint trace=0):
-    #    return child(self, pid, trace)
+#if EV_CHILD_ENABLE
+
+    def child(self, int pid, bint trace=0, ref=True):
+        if self.nochild:
+            raise TypeError('child watchers are not available because "nochild" is in effect')
+        return child(self, pid, trace, ref)
+
+#endif
+
+    def stat(self, bytes path, float interval=0.0, ref=True):
+        return stat(self, path, interval, ref)
 
     def callback(self):
         return callback(self)
@@ -423,14 +454,32 @@ cdef public class loop [object PyGeventLoopObject, type PyGeventLoop_Type]:
         if self.default:
             msg += ' default'
 #ifdef LIBEV_EMBED
-        if self.fileno() is not None:
-            msg += ' fileno=%s' % self.fileno()
-        args = (self.activecnt, self.fdchangecnt, self.timercnt, self.asynccnt)
-        msg += ' ref/io/timer/async=%r/%r/%r/%r' % args
+        msg += self._format_details()
 #endif
         return msg
 
 #ifdef LIBEV_EMBED
+
+    def _format_details(self):
+        cdef str msg = ''
+        cdef object fileno = self.fileno()
+        cdef object sigfd = None
+        cdef object activecnt = None
+        try:
+            sigfd = self.sigfd
+        except AttributeError:
+            sigfd = None
+        try:
+            activecnt = self.activecnt
+        except AttributeError:
+            pass
+        if fileno is not None:
+            msg += ' fileno=' + repr(fileno)
+        if activecnt is not None:
+            msg += ' ref=' + repr(activecnt)
+        if sigfd is not None and sigfd != -1:
+            msg += ' sigfd=' + repr(sigfd)
+        return msg
 
     def fileno(self):
         cdef int fd = self._ptr.backend_fd
@@ -439,11 +488,20 @@ cdef public class loop [object PyGeventLoopObject, type PyGeventLoop_Type]:
 
     LOOP_PROPERTY(activecnt)
 
-    LOOP_PROPERTY(fdchangecnt)
+#if EV_USE_SIGNALFD
+    LOOP_PROPERTY(sigfd)
+#endif
 
-    LOOP_PROPERTY(timercnt)
+    property origflags:
 
-    LOOP_PROPERTY(asynccnt)
+        def __get__(self):
+            return _flags_to_list(self._ptr.origflags)
+
+    property origflags_int:
+
+        def __get__(self):
+            return self._ptr.origflags
+
 #endif
 
 
@@ -733,7 +791,7 @@ cdef public class signal(watcher) [object PyGeventSignalObject, type PyGeventSig
     WATCHER(signal)
 
     def __init__(self, loop loop, int signalnum, ref=True):
-        if signalnum < 1 or signalnum >= NSIG:
+        if signalnum < 1 or signalnum >= signalmodule.NSIG:
             raise ValueError('illegal signal number: %r' % signalnum)
         # still possible to crash on one of libev's asserts:
         # 1) "libev: ev_signal_start called with illegal signal number"
@@ -787,12 +845,81 @@ cdef public class async(watcher) [object PyGeventAsyncObject, type PyGeventAsync
     def send(self):
         libev.ev_async_send(self.loop._ptr, &self._watcher)
 
+#if EV_CHILD_ENABLE
 
-#cdef public class child(watcher) [object PyGeventChildObject, type PyGeventChild_Type]:
-#
-#    WATCHER(child)
-#
-#    INIT(child, ``, int pid, bint trace=0'', ``, pid, trace'')
+cdef public class child(watcher) [object PyGeventChildObject, type PyGeventChild_Type]:
+
+    WATCHER(child)
+
+    def __init__(self, loop loop, int pid, bint trace=0, ref=True):
+        if not loop.default:
+            raise TypeError('child watchers are only available on the default loop')
+        libev.ev_child_init(&self._watcher, <void *>gevent_callback_child, pid, trace)
+        self.loop = loop
+        if ref:
+            self._flags = 0
+        else:
+            self._flags = 4
+
+    def _format(self):
+        return ' pid=%r rstatus=%r' % (self.pid, self.rstatus)
+
+    property pid:
+
+        def __get__(self):
+            return self._watcher.pid
+
+    property rpid:
+
+        def __get__(self):
+            return self._watcher.rpid
+
+        def __set__(self, int value):
+            self._watcher.rpid = value
+
+    property rstatus:
+
+        def __get__(self):
+            return self._watcher.rstatus
+
+        def __set__(self, int value):
+            self._watcher.rstatus = value
+
+#endif
+
+
+cdef public class stat(watcher) [object PyGeventStatObject, type PyGeventStat_Type]:
+
+    WATCHER(stat)
+    cdef readonly bytes path
+
+    def __init__(self, loop loop, bytes path, float interval=0.0, ref=True):
+        self.path = path
+        libev.ev_stat_init(&self._watcher, <void *>gevent_callback_stat, <char*>self.path, interval)
+        self.loop = loop
+        if ref:
+            self._flags = 0
+        else:
+            self._flags = 4
+
+    property attr:
+
+        def __get__(self):
+            if not self._watcher.attr.st_nlink:
+                return
+            return _pystat_fromstructstat(&self._watcher.attr)
+
+    property prev:
+
+       def __get__(self):
+            if not self._watcher.prev.st_nlink:
+                return
+            return _pystat_fromstructstat(&self._watcher.prev)
+
+    property interval:
+
+        def __get__(self):
+            return self._watcher.interval
 
 
 cdef public class callback(watcher) [object PyGeventCallbackObject, type PyGeventCallback_Type]:
@@ -858,3 +985,16 @@ def set_exc_info(object type, object value):
         Py_INCREF(<PyObjectPtr>value)
         tstate.exc_value = <PyObjectPtr>value
     tstate.exc_traceback = NULL
+
+
+#ifdef LIBEV_EMBED
+EV_USE_FLOOR = libev.EV_USE_FLOOR
+EV_USE_CLOCK_SYSCALL = libev.EV_USE_CLOCK_SYSCALL
+EV_USE_REALTIME = libev.EV_USE_REALTIME
+EV_USE_MONOTONIC = libev.EV_USE_MONOTONIC
+EV_USE_NANOSLEEP = libev.EV_USE_NANOSLEEP
+EV_USE_INOTIFY = libev.EV_USE_INOTIFY
+EV_USE_SIGNALFD = libev.EV_USE_SIGNALFD
+EV_USE_EVENTFD = libev.EV_USE_EVENTFD
+EV_USE_4HEAP = libev.EV_USE_4HEAP
+#endif

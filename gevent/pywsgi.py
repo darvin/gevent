@@ -12,7 +12,6 @@ from urllib import unquote
 from gevent import socket
 import gevent
 from gevent.server import StreamServer
-from gevent import server
 from gevent.hub import GreenletExit
 
 
@@ -138,7 +137,6 @@ class Input(object):
                 self.position = 0
                 if self.chunk_length == 0:
                     rfile.readline()
-
         return ''.join(response)
 
     def read(self, length=None):
@@ -417,7 +415,7 @@ class WSGIHandler(object):
             self.client_address[0],
             now,
             self.requestline,
-            (self.status or '000').split()[0],
+            (getattr(self, 'status', None) or '000').split()[0],
             length,
             delta)
 
@@ -488,7 +486,10 @@ class WSGIHandler(object):
             env['CONTENT_LENGTH'] = length
         env['SERVER_PROTOCOL'] = 'HTTP/1.0'
 
-        env['REMOTE_ADDR'] = self.client_address[0]
+        client_address = self.client_address
+        if isinstance(client_address, tuple):
+            env['REMOTE_ADDR'] = str(client_address[0])
+            env['REMOTE_PORT'] = str(client_address[1])
 
         for header in self.headers.headers:
             key, value = header.split(':', 1)
@@ -555,11 +556,8 @@ class WSGIServer(StreamServer):
             self.environ['wsgi.errors'] = sys.stderr
 
     def set_max_accept(self):
-        if self.max_accept is None:
-            if self.environ.get('wsgi.multiprocess'):
-                self.max_accept = 1
-            else:
-                self.max_accept = server.DEFAULT_MAX_ACCEPT
+        if self.environ.get('wsgi.multiprocess'):
+            self.max_accept = 1
 
     def get_environ(self):
         return self.environ.copy()
