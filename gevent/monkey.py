@@ -55,7 +55,7 @@ Monkey patches:
   - :func:`stack_size`
   - thread-local storage becomes greenlet-local storage
 """
-
+import functools
 import sys
 
 __all__ = ['patch_all',
@@ -137,8 +137,11 @@ def patch_thread(threading=True, _threading_local=True):
         threading = __import__('threading')
         threading.local = local
         threading._start_new_thread = green_thread.start_new_thread
-        threading._allocate_lock = green_thread.allocate_lock
-        threading.Lock = green_thread.allocate_lock
+        @functools.wraps(green_thread.allocate_lock)
+        def allocate_lock(*args):
+            return green_thread.allocate_lock()
+        threading._allocate_lock = allocate_lock
+        threading.Lock = allocate_lock
         threading._get_ident = green_thread.get_ident
         from gevent.hub import sleep
         threading._sleep = sleep
